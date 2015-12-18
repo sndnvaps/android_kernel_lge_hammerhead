@@ -2,7 +2,7 @@
  * Core MDSS framebuffer driver.
  *
  * Copyright (C) 2007 Google Incorporated
- * Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -493,38 +493,6 @@ static int mdss_fb_lpm_enable(struct msm_fb_data_type *mfd, int mode)
 	return 0;
 }
 
-static ssize_t mdss_fb_set_doze_mode(struct device *dev,
-	struct device_attribute *attr, const char *buf, size_t count)
-{
-	struct fb_info *fbi = dev_get_drvdata(dev);
-	struct msm_fb_data_type *mfd = fbi->par;
-	int rc = 0;
-	int doze_mode = 0;
-
-	rc = kstrtoint(buf, 10, &doze_mode);
-	if (rc) {
-		pr_err("kstrtoint failed. rc=%d\n", rc);
-		return rc;
-	}
-
-	pr_debug("Always-on mode %s\n", doze_mode ? "enabled" : "disabled");
-	if (mfd->panel_info->type !=  MIPI_CMD_PANEL)
-		pr_err("Always on mode only supported for cmd mode panel\n");
-	else
-		mfd->doze_mode = doze_mode;
-
-	return count;
-}
-
-static ssize_t mdss_fb_get_doze_mode(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct fb_info *fbi = dev_get_drvdata(dev);
-	struct msm_fb_data_type *mfd = fbi->par;
-
-	return scnprintf(buf, PAGE_SIZE, "%d\n", mfd->doze_mode);
-}
-
 static ssize_t mdss_fb_set_idle_pc(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
@@ -556,6 +524,68 @@ static ssize_t mdss_fb_get_idle_pc(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%d\n", mdata->idle_pc_enabled);
 }
 
+static int pcc_r = 32768, pcc_g = 32768, pcc_b = 32768;
+static ssize_t mdss_get_rgb(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d %d %d\n", pcc_r, pcc_g, pcc_b);
+}
+
+/**
+ * simple color temperature interface using polynomial color correction
+ *
+ * input values are r/g/b adjustments from 0-32768 representing 0 -> 1
+ *
+ * example adjustment @ 3500K:
+ * 1.0000 / 0.5515 / 0.2520 = 32768 / 25828 / 17347
+ *
+ * reference chart:
+ * http://www.vendian.org/mncharity/dir3/blackbody/UnstableURLs/bbr_color.html
+ */
+static ssize_t mdss_set_rgb(struct device *dev,
+	struct device_attribute *attr,
+	const char *buf, size_t count)
+{
+	uint32_t r = 0, g = 0, b = 0;
+	struct mdp_pcc_cfg_data pcc_cfg;
+	u32 copyback = 0;
+
+	if (count > 19)
+		return -EINVAL;
+
+	sscanf(buf, "%d %d %d", &r, &g, &b);
+
+	if (r < 0 || r > 32768)
+		return -EINVAL;
+	if (g < 0 || g > 32768)
+		return -EINVAL;
+	if (b < 0 || b > 32768)
+		return -EINVAL;
+
+	pr_info("%s: r=%d g=%d b=%d\n", __func__, r, g, b);
+
+	memset(&pcc_cfg, 0, sizeof(struct mdp_pcc_cfg_data));
+
+	pcc_cfg.block = MDP_LOGICAL_BLOCK_DISP_0;
+	if (r == 32768 && g == 32768 && b == 32768)
+		pcc_cfg.ops = MDP_PP_OPS_DISABLE;
+	else
+		pcc_cfg.ops = MDP_PP_OPS_ENABLE;
+	pcc_cfg.ops |= MDP_PP_OPS_WRITE;
+	pcc_cfg.r.r = r;
+	pcc_cfg.g.g = g;
+	pcc_cfg.b.b = b;
+
+	if (mdss_mdp_pcc_config(&pcc_cfg, &copyback) == 0) {
+		pcc_r = r;
+		pcc_g = g;
+		pcc_b = b;
+		return count;
+	}
+
+	return -EINVAL;
+}
+
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, mdss_fb_get_type, NULL);
 static DEVICE_ATTR(msm_fb_split, S_IRUGO, mdss_fb_get_split, NULL);
 static DEVICE_ATTR(show_blank_event, S_IRUGO, mdss_mdp_show_blank_event, NULL);
@@ -563,10 +593,10 @@ static DEVICE_ATTR(idle_time, S_IRUGO | S_IWUSR | S_IWGRP,
 	mdss_fb_get_idle_time, mdss_fb_set_idle_time);
 static DEVICE_ATTR(idle_notify, S_IRUGO, mdss_fb_get_idle_notify, NULL);
 static DEVICE_ATTR(msm_fb_panel_info, S_IRUGO, mdss_fb_get_panel_info, NULL);
-static DEVICE_ATTR(always_on, S_IRUGO | S_IWUSR | S_IWGRP,
-	mdss_fb_get_doze_mode, mdss_fb_set_doze_mode);
 static DEVICE_ATTR(idle_pc, S_IRUGO | S_IWUSR | S_IWGRP, mdss_fb_get_idle_pc,
 	mdss_fb_set_idle_pc);
+static DEVICE_ATTR(rgb, S_IRUGO | S_IWUSR | S_IWGRP, mdss_get_rgb,
+	mdss_set_rgb);
 
 static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_msm_fb_type.attr,
@@ -575,8 +605,8 @@ static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_idle_time.attr,
 	&dev_attr_idle_notify.attr,
 	&dev_attr_msm_fb_panel_info.attr,
-	&dev_attr_always_on.attr,
 	&dev_attr_idle_pc.attr,
+	&dev_attr_rgb.attr,
 	NULL,
 };
 
@@ -809,17 +839,17 @@ static int mdss_fb_suspend_sub(struct msm_fb_data_type *mfd)
 
 	if (mfd->op_enable) {
 		/*
-		 * Ideally, display should have been blanked by now.
-		 * If not, then blank the display based on whether always-on
-		 * feature is enabled or not
+		 * Ideally, display should have either been blanked by now, or
+		 * should have transitioned to a low power state. If not, then
+		 * as a fall back option, blank the display.
 		 */
-		int unblank_flag = mfd->doze_mode ? FB_BLANK_VSYNC_SUSPEND :
-			FB_BLANK_POWERDOWN;
-		ret = mdss_fb_blank_sub(unblank_flag, mfd->fbi,
-				mfd->suspend.op_enable);
-		if (ret) {
-			pr_warn("can't turn off display!\n");
-			return ret;
+		if (mdss_fb_is_power_on_interactive(mfd)) {
+			ret = mdss_fb_blank_sub(FB_BLANK_POWERDOWN, mfd->fbi,
+					mfd->suspend.op_enable);
+			if (ret) {
+				pr_err("can't turn off display!\n");
+				return ret;
+			}
 		}
 		mfd->op_enable = false;
 		fb_set_suspend(mfd->fbi, FBINFO_STATE_SUSPENDED);
@@ -849,9 +879,16 @@ static int mdss_fb_resume_sub(struct msm_fb_data_type *mfd)
 	/* resume state var recover */
 	mfd->op_enable = mfd->suspend.op_enable;
 
+	/*
+	 * If the fb was explicitly blanked during suspend, then unblank it
+	 * during resume.
+	 */
 	if (mdss_panel_is_power_on(mfd->suspend.panel_power_state)) {
-		ret = mdss_fb_blank_sub(FB_BLANK_UNBLANK, mfd->fbi,
-					mfd->op_enable);
+		int unblank_flag = mdss_panel_is_power_on_interactive(
+			mfd->suspend.panel_power_state) ? FB_BLANK_UNBLANK :
+			FB_BLANK_VSYNC_SUSPEND;
+
+		ret = mdss_fb_blank_sub(unblank_flag, mfd->fbi, mfd->op_enable);
 		if (ret)
 			pr_warn("can't turn on display!\n");
 		else
@@ -985,15 +1022,9 @@ void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 	u32 temp = bkl_lvl;
 	bool bl_notify_needed = false;
 
-	/* todo: temporary workaround to support doze mode */
-	if ((bkl_lvl == 0) && (mfd->doze_mode)) {
-		pr_debug("keeping backlight on with always-on displays\n");
-		mfd->unset_bl_level = 0;
-		return;
-	}
-
-	if (((mdss_fb_is_power_off(mfd) && mfd->dcm_state != DCM_ENTER)
-		|| !mfd->bl_updated) && !IS_CALIB_MODE_BL(mfd)) {
+	if ((((mdss_fb_is_power_off(mfd) && mfd->dcm_state != DCM_ENTER)
+		|| !mfd->bl_updated) && !IS_CALIB_MODE_BL(mfd)) ||
+		mfd->panel_info->cont_splash_enabled) {
 		mfd->unset_bl_level = bkl_lvl;
 		return;
 	} else {
@@ -1006,6 +1037,8 @@ void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 		if (mfd->mdp.ad_calc_bl)
 			(*mfd->mdp.ad_calc_bl)(mfd, temp, &temp,
 					&bl_notify_needed);
+		if (bl_notify_needed)
+			mdss_fb_bl_update_notify(mfd);
 
 		mfd->bl_level_prev_scaled = mfd->bl_level_scaled;
 		if (!IS_CALIB_MODE_BL(mfd))
@@ -1025,10 +1058,7 @@ void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 			pdata->set_backlight(pdata, temp);
 			mfd->bl_level = bkl_lvl;
 			mfd->bl_level_scaled = temp;
-			bl_notify_needed = true;
 		}
-		if (bl_notify_needed)
-			mdss_fb_bl_update_notify(mfd);
 	}
 }
 
@@ -1047,10 +1077,11 @@ void mdss_fb_update_backlight(struct msm_fb_data_type *mfd)
 			if (mfd->mdp.ad_calc_bl)
 				(*mfd->mdp.ad_calc_bl)(mfd, temp, &temp,
 						&bl_notify);
+			if (bl_notify)
+				mdss_fb_bl_update_notify(mfd);
 			pdata->set_backlight(pdata, temp);
 			mfd->bl_level_scaled = mfd->unset_bl_level;
 			mfd->bl_updated = 1;
-			mdss_fb_bl_update_notify(mfd);
 		}
 	}
 	mutex_unlock(&mfd->bl_lock);
@@ -2172,6 +2203,14 @@ static void mdss_fb_release_fences(struct msm_fb_data_type *mfd)
 	mutex_unlock(&sync_pt_data->sync_mutex);
 }
 
+static void mdss_fb_release_kickoff(struct msm_fb_data_type *mfd)
+{
+	if (mfd->wait_for_kickoff) {
+		atomic_set(&mfd->kickoff_pending, 0);
+		wake_up_all(&mfd->kickoff_wait_q);
+	}
+}
+
 /**
  * __mdss_fb_sync_buf_done_callback() - process async display events
  * @p:		Notifier block registered for async events.
@@ -2214,6 +2253,9 @@ static int __mdss_fb_sync_buf_done_callback(struct notifier_block *p,
 		pr_debug("%s: frame done\n", sync_pt_data->fence_name);
 		mdss_fb_signal_timeline(sync_pt_data);
 		break;
+	case MDP_NOTIFY_FRAME_START:
+		mdss_fb_release_kickoff(mfd);
+		break;
 	}
 
 	return NOTIFY_OK;
@@ -2251,6 +2293,9 @@ static int mdss_fb_pan_idle(struct msm_fb_data_type *mfd)
 static int mdss_fb_wait_for_kickoff(struct msm_fb_data_type *mfd)
 {
 	int ret = 0;
+
+	if (!mfd->wait_for_kickoff)
+		return mdss_fb_pan_idle(mfd);
 
 	ret = wait_event_timeout(mfd->kickoff_wait_q,
 			(!atomic_read(&mfd->kickoff_pending) ||
@@ -2408,15 +2453,14 @@ static int __mdss_fb_perform_commit(struct msm_fb_data_type *mfd)
 		if (ret)
 			pr_err("pan display failed %x on fb%d\n", ret,
 					mfd->index);
-		atomic_set(&mfd->kickoff_pending, 0);
-		wake_up_all(&mfd->kickoff_wait_q);
 	}
 	if (!ret)
 		mdss_fb_update_backlight(mfd);
 
-	if (IS_ERR_VALUE(ret) || !sync_pt_data->flushed)
+	if (IS_ERR_VALUE(ret) || !sync_pt_data->flushed) {
+		mdss_fb_release_kickoff(mfd);
 		mdss_fb_signal_timeline(sync_pt_data);
-
+	}
 	return ret;
 }
 
@@ -2445,8 +2489,8 @@ static int __mdss_fb_display_thread(void *data)
 		wake_up_all(&mfd->idle_wait_q);
 	}
 
+	mdss_fb_release_kickoff(mfd);
 	atomic_set(&mfd->commits_pending, 0);
-	atomic_set(&mfd->kickoff_pending, 0);
 	wake_up_all(&mfd->idle_wait_q);
 
 	return ret;
